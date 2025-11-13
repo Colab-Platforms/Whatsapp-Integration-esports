@@ -43,6 +43,19 @@ const db = admin.firestore();
 app.use(cors());
 app.use(express.json());
 
+// Request logging middleware
+app.use((req, res, next) => {
+  console.log(`${new Date().toISOString()} - ${req.method} ${req.path}`);
+  next();
+});
+
+// Global error handler
+app.use((err, req, res, next) => {
+  console.error(`❌ Global error: ${err.message}`);
+  console.error(err.stack);
+  res.status(500).json({ error: "Internal server error", message: err.message });
+});
+
 // 🔹 In-memory store (optional, for quick debug)
 let receivedMessagesStore = [];
 
@@ -55,6 +68,16 @@ app.post("/api/send-whatsapp", sendWhatsAppMessage);
 app.get("/", (req, res) =>
   res.send("✅ WhatsApp API + Firebase connected successfully!")
 );
+
+// Health check endpoint
+app.get("/health", (req, res) => {
+  res.status(200).json({
+    status: "healthy",
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime(),
+    memory: process.memoryUsage(),
+  });
+});
 
 // ================================================================
 /** ✅ STEP 1: VERIFY WEBHOOK */
@@ -83,6 +106,50 @@ const WHATSAPP_API_URL =
   process.env.WHATSAPP_API_URL || "https://graph.facebook.com/v20.0";
 const WHATSAPP_PHONE_ID = process.env.PHONE_NUMBER_ID;
 const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
+
+// ================================================================
+// ✅ CHAT MESSAGE LIMIT CONFIGURATION
+// ================================================================
+const MAX_CHAT_MESSAGES = 10;
+
+/**
+ * Maintains chat message limit by deleting oldest messages
+ * @param {string} shortPhone - 10-digit phone number
+ */
+async function maintainChatLimit(shortPhone) {
+  try {
+    const messagesRef = db
+      .collection("whatsappChats")
+      .doc(shortPhone)
+      .collection("messages");
+
+    // Get total message count
+    const snapshot = await messagesRef.get();
+    const totalMessages = snapshot.size;
+
+    if (totalMessages > MAX_CHAT_MESSAGES) {
+      const excessCount = totalMessages - MAX_CHAT_MESSAGES;
+      console.log(`🗑️ Deleting ${excessCount} old messages for ${shortPhone}`);
+
+      // Get oldest messages to delete
+      const oldMessagesSnapshot = await messagesRef
+        .orderBy("timestamp", "asc")
+        .limit(excessCount)
+        .get();
+
+      // Delete in batch
+      const batch = db.batch();
+      oldMessagesSnapshot.docs.forEach((doc) => {
+        batch.delete(doc.ref);
+      });
+      await batch.commit();
+
+      console.log(`✅ Deleted ${excessCount} old messages for ${shortPhone}`);
+    }
+  } catch (error) {
+    console.error(`❌ Error maintaining chat limit for ${shortPhone}:`, error.message);
+  }
+}
 
 // ================================================================
 // ✅ STEP 2: RECEIVE INCOMING WHATSAPP MESSAGES
@@ -127,6 +194,9 @@ app.post("/webhook", async (req, res) => {
           .collection("whatsappChats")
           .doc(shortPhone)
           .set({ lastUpdated: timestamp }, { merge: true });
+
+        // Maintain chat message limit (delete old messages if > 10)
+        await maintainChatLimit(shortPhone);
       }
 
       // ✅ IMAGE MESSAGE: DO NOT store in whatsappChats; save to teamRegistrations only
@@ -331,12 +401,58 @@ app.post("/api/chat/send", async (req, res) => {
       .doc(shortPhone)
       .set({ lastUpdated: timestamp }, { merge: true });
 
+    // Maintain chat message limit (delete old messages if > 10)
+    await maintainChatLimit(shortPhone);
+
     res
       .status(200)
       .json({ success: true, message: "Message sent successfully" });
   } catch (err) {
     console.error("❌ Admin send error:", err.response?.data || err.message);
     res.status(500).json({ error: "Failed to send WhatsApp message" });
+  }
+});
+
+// ================================================================
+// ✅ MANUAL CLEANUP ENDPOINT (Optional - for maintenance)
+// ================================================================
+app.post("/api/chat/cleanup/:phoneNumber", async (req, res) => {
+  try {
+    const { phoneNumber } = req.params;
+    const shortPhone = phoneNumber.slice(-10);
+
+    await maintainChatLimit(shortPhone);
+
+    res.status(200).json({
+      success: true,
+      message: `Chat cleanup completed for ${shortPhone}`,
+    });
+  } catch (err) {
+    console.error("❌ Error during manual cleanup:", err.message);
+    res.status(500).json({ error: "Failed to cleanup chat history" });
+  }
+});
+
+// ================================================================
+// ✅ CLEANUP ALL CHATS (Admin endpoint - use with caution)
+// ================================================================
+app.post("/api/chat/cleanup-all", async (req, res) => {
+  try {
+    const chatsSnapshot = await db.collection("whatsappChats").get();
+    let cleanedCount = 0;
+
+    for (const chatDoc of chatsSnapshot.docs) {
+      await maintainChatLimit(chatDoc.id);
+      cleanedCount++;
+    }
+
+    res.status(200).json({
+      success: true,
+      message: `Cleaned up ${cleanedCount} chat conversations`,
+    });
+  } catch (err) {
+    console.error("❌ Error during bulk cleanup:", err.message);
+    res.status(500).json({ error: "Failed to cleanup all chats" });
   }
 });
 
@@ -378,9 +494,46 @@ app.get("/api/chat/history/:phoneNumber", async (req, res) => {
 });
 
 // ================================================================
+// ✅ KEEP-ALIVE PING (Prevents Render free tier from sleeping)
+// ================================================================
+const SELF_PING_INTERVAL = 14 * 60 * 1000; // 14 minutes
+const RENDER_URL = process.env.RENDER_EXTERNAL_URL || "https://whatsapp-integration-esports.onrender.com";
+
+if (process.env.NODE_ENV !== "development") {
+  setInterval(async () => {
+    try {
+      const response = await axios.get(`${RENDER_URL}/`);
+      console.log(`✅ Keep-alive ping successful at ${new Date().toISOString()}`);
+    } catch (error) {
+      console.error(`❌ Keep-alive ping failed: ${error.message}`);
+    }
+  }, SELF_PING_INTERVAL);
+}
+
+// ================================================================
+// ✅ PROCESS MONITORING
+// ================================================================
+process.on("uncaughtException", (error) => {
+  console.error("❌ Uncaught Exception:", error);
+  console.error(error.stack);
+});
+
+process.on("unhandledRejection", (reason, promise) => {
+  console.error("❌ Unhandled Rejection at:", promise, "reason:", reason);
+});
+
+// Log memory usage every 5 minutes
+setInterval(() => {
+  const used = process.memoryUsage();
+  console.log(`📊 Memory Usage: RSS=${Math.round(used.rss / 1024 / 1024)}MB, Heap=${Math.round(used.heapUsed / 1024 / 1024)}MB`);
+}, 5 * 60 * 1000);
+
+// ================================================================
 // ✅ START SERVER
 // ================================================================
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, "0.0.0.0", () =>
-  console.log(`🚀 Server running on http://localhost:${PORT}`)
-);
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`🚀 Server running on http://localhost:${PORT}`);
+  console.log(`📡 Keep-alive enabled: ${process.env.NODE_ENV !== "development"}`);
+  console.log(`💾 Initial Memory: ${Math.round(process.memoryUsage().heapUsed / 1024 / 1024)}MB`);
+});
