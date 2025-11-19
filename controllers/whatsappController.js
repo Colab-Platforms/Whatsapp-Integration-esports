@@ -2,7 +2,7 @@ import axios from "axios";
 import dotenv from "dotenv";
 dotenv.config();
 
-const WHATSAPP_API_URL = `https://graph.facebook.com/v19.0/${process.env.PHONE_NUMBER_ID}/messages`;
+const WHATSAPP_API_URL = `https://graph.facebook.com/v20.0/${process.env.PHONE_NUMBER_ID}/messages`;
 
 export const sendWhatsAppMessage = async (req, res) => {
   try {
@@ -19,7 +19,7 @@ export const sendWhatsAppMessage = async (req, res) => {
   to: formattedUserPhone,
   type: "template",
   template: {
-    name: "colabgreeting", // Must match your approved template name
+    name: "game_greeting", // Must match your approved template name
     language: { code: "en" }, // Use exact language (check in WhatsApp Manager)
     components: [
       {

@@ -345,7 +345,7 @@ app.post("/api/verify/verified", (req, res) =>
   handleVerify(req, res, "verified")
 );
 app.post("/api/verify/not-verified", (req, res) =>
-  handleVerify(req, res, "not_verified")
+  handleVerify(req, res, "not_eligible")
 );
 app.post("/api/verify/pending", (req, res) =>
   handleVerify(req, res, "pending")
