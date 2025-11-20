@@ -2,7 +2,7 @@ import axios from "axios";
 import dotenv from "dotenv";
 dotenv.config();
 
-const WHATSAPP_API_URL = `https://graph.facebook.com/v20.0/${process.env.PHONE_NUMBER_ID}/messages`;
+const WHATSAPP_API_URL = `https://graph.facebook.com/v24.0/${process.env.PHONE_NUMBER_ID}/messages`;
 
 export const sendWhatsAppMessage = async (req, res) => {
   try {

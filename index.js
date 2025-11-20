@@ -13,6 +13,16 @@ import admin from "firebase-admin";
 dotenv.config();
 const app = express();
 
+// REQUIRED for WhatsApp Cloud API
+app.use(
+  express.json({
+    verify: (req, res, buf) => {
+      req.rawBody = buf.toString("utf8");
+    },
+  })
+);
+
+
 // 🔹 File path helpers
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -41,7 +51,7 @@ const db = admin.firestore();
 
 // 🔹 Express middleware
 app.use(cors());
-app.use(express.json());
+// app.use(express.json());
 
 // Request logging middleware
 app.use((req, res, next) => {
@@ -103,7 +113,7 @@ app.get("/webhook", (req, res) => {
 // ✅ ENV for WhatsApp API
 // ================================================================
 const WHATSAPP_API_URL =
-  process.env.WHATSAPP_API_URL || "https://graph.facebook.com/v20.0";
+  process.env.WHATSAPP_API_URL || "https://graph.facebook.com/v24.0";
 const WHATSAPP_PHONE_ID = process.env.PHONE_NUMBER_ID;
 const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
 
@@ -206,7 +216,7 @@ app.post("/webhook", async (req, res) => {
         try {
           // 1) Get media URL
           const mediaRes = await axios.get(
-            `https://graph.facebook.com/v20.0/${mediaId}`,
+            `https://graph.facebook.com/v24.0/${mediaId}`,
             {
               headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` },
             }
