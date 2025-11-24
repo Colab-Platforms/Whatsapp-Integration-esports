@@ -51,7 +51,7 @@ const db = admin.firestore();
 
 // 🔹 Express middleware
 app.use(cors());
-// app.use(express.json());
+app.use(express.json());
 
 // Request logging middleware
 app.use((req, res, next) => {
@@ -123,7 +123,7 @@ const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
 const MAX_CHAT_MESSAGES = 10;
 
 /**
- * Maintains chat message limit by deleting oldest messages
+ * Maintains chat message limit by deleting oldest messages (for registered users)
  * @param {string} shortPhone - 10-digit phone number
  */
 async function maintainChatLimit(shortPhone) {
@@ -161,6 +161,45 @@ async function maintainChatLimit(shortPhone) {
   }
 }
 
+/**
+ * Maintains support chat message limit by deleting oldest messages (for unknown users)
+ * @param {string} shortPhone - 10-digit phone number
+ */
+async function maintainSupportChatLimit(shortPhone) {
+  try {
+    const messagesRef = db
+      .collection("supportChats")
+      .doc(shortPhone)
+      .collection("messages");
+
+    // Get total message count
+    const snapshot = await messagesRef.get();
+    const totalMessages = snapshot.size;
+
+    if (totalMessages > MAX_CHAT_MESSAGES) {
+      const excessCount = totalMessages - MAX_CHAT_MESSAGES;
+      console.log(`🗑️ Deleting ${excessCount} old support messages for ${shortPhone}`);
+
+      // Get oldest messages to delete
+      const oldMessagesSnapshot = await messagesRef
+        .orderBy("timestamp", "asc")
+        .limit(excessCount)
+        .get();
+
+      // Delete in batch
+      const batch = db.batch();
+      oldMessagesSnapshot.docs.forEach((doc) => {
+        batch.delete(doc.ref);
+      });
+      await batch.commit();
+
+      console.log(`✅ Deleted ${excessCount} old support messages for ${shortPhone}`);
+    }
+  } catch (error) {
+    console.error(`❌ Error maintaining support chat limit for ${shortPhone}:`, error.message);
+  }
+}
+
 // ================================================================
 // ✅ STEP 2: RECEIVE INCOMING WHATSAPP MESSAGES
 // ================================================================
@@ -181,32 +220,66 @@ app.post("/webhook", async (req, res) => {
       const shortPhone = from.slice(-10);  // use 10-digit doc id
       const timestamp = new Date().toISOString();
 
-      // ✅ TEXT MESSAGE: store in whatsappChats
+      // ✅ TEXT MESSAGE: Check if user is registered and save accordingly
       if (msg.text?.body) {
         const text = msg.text.body;
         console.log(`📩 Text from ${from}: ${text}`);
         receivedMessagesStore.push({ from, text, timestamp });
 
-        // Save text message to whatsappChats ONLY
-        await db
-          .collection("whatsappChats")
-          .doc(shortPhone)
-          .collection("messages")
-          .add({
-            from: "user",
-            text,
-            timestamp,
-            read: false,
-            type: "text",
-          });
+        // Check if user is registered in teamRegistrations
+        const teamSnapshot = await db
+          .collection("teamRegistrations")
+          .where("phoneNumber", "==", shortPhone)
+          .limit(1)
+          .get();
 
-        await db
-          .collection("whatsappChats")
-          .doc(shortPhone)
-          .set({ lastUpdated: timestamp }, { merge: true });
+        const isRegistered = !teamSnapshot.empty;
 
-        // Maintain chat message limit (delete old messages if > 10)
-        await maintainChatLimit(shortPhone);
+        if (isRegistered) {
+          // ✅ REGISTERED USER: Save to whatsappChats
+          console.log(`💬 Registered user message: ${shortPhone}`);
+          await db
+            .collection("whatsappChats")
+            .doc(shortPhone)
+            .collection("messages")
+            .add({
+              from: "user",
+              text,
+              timestamp,
+              read: false,
+              type: "text",
+            });
+
+          await db
+            .collection("whatsappChats")
+            .doc(shortPhone)
+            .set({ lastUpdated: timestamp }, { merge: true });
+
+          // Maintain chat message limit
+          await maintainChatLimit(shortPhone);
+        } else {
+          // ✅ UNKNOWN USER: Save to supportChats
+          console.log(`🆘 Unknown user message: ${shortPhone}`);
+          await db
+            .collection("supportChats")
+            .doc(shortPhone)
+            .collection("messages")
+            .add({
+              from: "user",
+              text,
+              timestamp,
+              read: false,
+              type: "text",
+            });
+
+          await db
+            .collection("supportChats")
+            .doc(shortPhone)
+            .set({ lastUpdated: timestamp }, { merge: true });
+
+          // Maintain chat message limit for support chats
+          await maintainSupportChatLimit(shortPhone);
+        }
       }
 
       // ✅ IMAGE MESSAGE: DO NOT store in whatsappChats; save to teamRegistrations only
@@ -500,6 +573,200 @@ app.get("/api/chat/history/:phoneNumber", async (req, res) => {
   } catch (err) {
     console.error("❌ Error fetching chat history:", err.message);
     res.status(500).json({ error: "Failed to fetch chat history" });
+  }
+});
+
+// ================================================================
+// ✅ ADMIN → SUPPORT USER CHAT API (SEND MESSAGE TO UNKNOWN USER)
+//     - Sends via WhatsApp API
+//     - Stores in supportChats collection
+// ================================================================
+app.post("/api/support/send", async (req, res) => {
+  try {
+    const { phoneNumber, message } = req.body;
+    if (!phoneNumber || !message)
+      return res
+        .status(400)
+        .json({ error: "phoneNumber and message are required" });
+
+    // Send via WhatsApp
+    const url = `${WHATSAPP_API_URL}/${WHATSAPP_PHONE_ID}/messages`;
+    const payload = {
+      messaging_product: "whatsapp",
+      to: phoneNumber, // keep full number with country code for Meta
+      type: "text",
+      text: { body: message },
+    };
+
+    await axios.post(url, payload, {
+      headers: {
+        Authorization: `Bearer ${WHATSAPP_TOKEN}`,
+        "Content-Type": "application/json",
+      },
+    });
+
+    // Save to supportChats collection
+    const timestamp = new Date().toISOString();
+    const shortPhone = phoneNumber.slice(-10);
+
+    await db
+      .collection("supportChats")
+      .doc(shortPhone)
+      .collection("messages")
+      .add({
+        from: "admin",
+        text: message,
+        timestamp,
+        read: false,
+        type: "text",
+      });
+
+    await db
+      .collection("supportChats")
+      .doc(shortPhone)
+      .set({ lastUpdated: timestamp }, { merge: true });
+
+    // Maintain support chat message limit
+    await maintainSupportChatLimit(shortPhone);
+
+    res
+      .status(200)
+      .json({ success: true, message: "Support message sent successfully" });
+  } catch (err) {
+    console.error("❌ Admin support send error:", err.response?.data || err.message);
+    res.status(500).json({ error: "Failed to send support message" });
+  }
+});
+
+// ================================================================
+// ✅ FETCH SUPPORT CHAT HISTORY (for unknown users)
+//     - Reads from supportChats collection
+// ================================================================
+app.get("/api/support/history/:phoneNumber", async (req, res) => {
+  try {
+    const { phoneNumber } = req.params;
+    const shortPhone = phoneNumber.slice(-10);
+
+    // Check if the chat document exists in supportChats
+    const chatDoc = await db
+      .collection("supportChats")
+      .doc(shortPhone)
+      .get();
+
+    // If no chat document exists, return empty messages array
+    if (!chatDoc.exists) {
+      console.log(`ℹ️ No support chat history found for ${shortPhone}, returning empty array`);
+      return res.status(200).json({ phoneNumber: shortPhone, messages: [] });
+    }
+
+    const messagesSnapshot = await db
+      .collection("supportChats")
+      .doc(shortPhone)
+      .collection("messages")
+      .orderBy("timestamp", "desc")
+      .limit(10)
+      .get();
+
+    const messages = messagesSnapshot.docs.map((doc) => doc.data()).reverse();
+    res.status(200).json({ phoneNumber: shortPhone, messages });
+  } catch (err) {
+    console.error("❌ Error fetching support chat history:", err.message);
+    res.status(500).json({ error: "Failed to fetch support chat history" });
+  }
+});
+
+// ================================================================
+// ✅ GET ALL SUPPORT CHAT USERS (for support tab)
+//     - Returns list of ONLY UNKNOWN users from supportChats collection
+// ================================================================
+app.get("/api/support/users", async (req, res) => {
+  try {
+    const chatsSnapshot = await db.collection("supportChats").get();
+    const users = [];
+
+    for (const chatDoc of chatsSnapshot.docs) {
+      const phoneNumber = chatDoc.id;
+      const chatData = chatDoc.data();
+      
+      // Get the last message
+      const lastMessageSnapshot = await db
+        .collection("supportChats")
+        .doc(phoneNumber)
+        .collection("messages")
+        .orderBy("timestamp", "desc")
+        .limit(1)
+        .get();
+
+      const lastMessage = lastMessageSnapshot.empty 
+        ? null 
+        : lastMessageSnapshot.docs[0].data();
+
+      users.push({
+        phoneNumber,
+        name: phoneNumber, // Use phone number as name
+        profileImage: null,
+        lastMessage: lastMessage?.text || "No messages",
+        lastMessageTime: lastMessage?.timestamp || chatData.lastUpdated,
+        unreadCount: 0,
+        isRegistered: false,
+      });
+    }
+
+    // Sort by last message time (most recent first)
+    users.sort((a, b) => new Date(b.lastMessageTime) - new Date(a.lastMessageTime));
+
+    console.log(`✅ Found ${users.length} unknown users in support chat`);
+    res.status(200).json({ users });
+  } catch (err) {
+    console.error("❌ Error fetching support users:", err.message);
+    res.status(500).json({ error: "Failed to fetch support users" });
+  }
+});
+
+// ================================================================
+// ✅ GET USER DETAILS FOR SUPPORT (phone, media files, etc.)
+// ================================================================
+app.get("/api/support/user/:phoneNumber", async (req, res) => {
+  try {
+    const { phoneNumber } = req.params;
+    const shortPhone = phoneNumber.slice(-10);
+
+    // Get message count from supportChats
+    const messagesSnapshot = await db
+      .collection("supportChats")
+      .doc(shortPhone)
+      .collection("messages")
+      .get();
+
+    const messageCount = messagesSnapshot.size;
+
+    // Get first message timestamp
+    const firstMessageSnapshot = await db
+      .collection("supportChats")
+      .doc(shortPhone)
+      .collection("messages")
+      .orderBy("timestamp", "asc")
+      .limit(1)
+      .get();
+
+    const firstMessageTime = firstMessageSnapshot.empty 
+      ? null 
+      : firstMessageSnapshot.docs[0].data().timestamp;
+
+    res.status(200).json({
+      phoneNumber: shortPhone,
+      name: "Unknown User",
+      email: "N/A",
+      profileImage: null,
+      mediaFiles: [],
+      isRegistered: false,
+      messageCount: messageCount,
+      firstContactTime: firstMessageTime,
+      registrationData: null,
+    });
+  } catch (err) {
+    console.error("❌ Error fetching user details:", err.message);
+    res.status(500).json({ error: "Failed to fetch user details" });
   }
 });
 
