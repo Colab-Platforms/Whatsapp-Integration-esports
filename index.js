@@ -212,6 +212,35 @@ app.post("/webhook", async (req, res) => {
     }
 
     const change = body.entry?.[0]?.changes?.[0]?.value;
+
+
+
+     // 🔥 DELIVERY TRACKING BLOCK (your requested output here)
+    // ============================================================
+    if (change?.statuses) {
+      change.statuses.forEach((status) => {
+
+        const statusLog = {
+          statuses: [
+            {
+              status: status.status,
+              errors: status.errors
+                ? status.errors.map(err => ({
+                    code: err.code,
+                    title: err.title,
+                    message: err.message
+                  }))
+                : undefined
+            }
+          ]
+        };
+
+        console.log("📦 DELIVERY STATUS UPDATE:\n" + JSON.stringify(statusLog, null, 2));
+      });
+    }
+
+
+
     const messages = change?.messages;
     if (!messages) return res.status(200).json({ status: "no messages" });
 
