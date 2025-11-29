@@ -805,96 +805,159 @@ app.get("/api/support/user/:phoneNumber", async (req, res) => {
 // ✅ BULK MESSAGE SENDER API ENDPOINTS
 // ================================================================
 
+// Map of template → language + body param count + optional header type
+// header: "image" | "video" | null
+const TEMPLATE_META = {
+    not_eligible: { language: "en_US", bodyParams: 0, header: null },
+  verified:     { language: "en_US", bodyParams: 0, header: null },
+  pending:      { language: "en_US", bodyParams: 0, header: null },
+  game_greeting:{ language: "en_US", bodyParams: 0, header: null },
+  // EXAMPLES (uncomment / adjust when you create them):
+  // tournament_reminder: {
+  //   language: "en_US",
+  //   bodyParams: 2,         // e.g. {{1}} = tournament, {{2}} = date
+  //   header: "image"        // uses header image
+  // },
+};
+
 /**
  * Helper function to send WhatsApp template message with dynamic parameters
  * @param {string} to - Phone number with country code (e.g., 919876543210)
  * @param {string} templateName - Name of the WhatsApp template
- * @param {object} params - Dynamic parameters for the template (e.g., {tournament, date})
+ * @param {object} params - Dynamic parameters for the template (e.g., { tournament, date, imageUrl })
  * @returns {Promise<object>} - WhatsApp API response
  */
-async function sendTemplateMessageWithParams(to, templateName, params) {
+async function sendTemplateMessageWithParams(to, templateName, params = {}) {
   const url = `${WHATSAPP_API_URL}/${WHATSAPP_PHONE_ID}/messages`;
-  
+
   // Validate inputs
   if (!to || to.trim() === "") {
     throw new Error("Phone number is required");
   }
-  
+
   if (!templateName || templateName.trim() === "") {
     throw new Error("Template name is required");
   }
-  
-  // Build template components based on parameters
+
+  // Resolve template meta (fallback = text-only, 0 params, en_US)
+  if(!TEMPLATE_META[templateName]){
+  TEMPLATE_META[templateName] = { language:"en_US", bodyParams:0, header:null };
+  console.log(`⚠ Auto-added template: ${templateName}`);
+}
+const meta = TEMPLATE_META[templateName];
+
+
   const components = [];
-  
-  if (params && (params.tournament || params.date)) {
-    const parameters = [];
-    if (params.tournament) {
-      parameters.push({ type: "text", text: String(params.tournament) });
-    }
-    if (params.date) {
-      parameters.push({ type: "text", text: String(params.date) });
-    }
-    
+
+  // 🔹 1) HEADER (image / video) SUPPORT
+  // If your template has a media header, configure `header` in TEMPLATE_META
+  if (meta.header === "image" && params.imageUrl) {
     components.push({
-      type: "body",
-      parameters: parameters
+      type: "header",
+      parameters: [
+        {
+          type: "image",
+          image: {
+            link: String(params.imageUrl),
+          },
+        },
+      ],
+    });
+  } else if (meta.header === "video" && params.videoUrl) {
+    components.push({
+      type: "header",
+      parameters: [
+        {
+          type: "video",
+          video: {
+            link: String(params.videoUrl),
+          },
+        },
+      ],
     });
   }
-  
+
+  // 🔹 2) BODY PARAMETERS (ONLY if template expects them)
+  if (meta.bodyParams > 0) {
+    const bodyParameters = [];
+
+    // Simple mapping for your current use case (tournament + date)
+    if (params.tournament) {
+      bodyParameters.push({ type: "text", text: String(params.tournament) });
+    }
+    if (params.date) {
+      bodyParameters.push({ type: "text", text: String(params.date) });
+    }
+
+    // Optional: support generic `params.body = [v1, v2, ...]`
+    if (Array.isArray(params.body)) {
+      params.body.forEach((val) => {
+        bodyParameters.push({ type: "text", text: String(val) });
+      });
+    }
+
+    if (bodyParameters.length !== meta.bodyParams) {
+      throw new Error(
+        `Template "${templateName}" expects ${meta.bodyParams} body params, but got ${bodyParameters.length}`
+      );
+    }
+
+    components.push({
+      type: "body",
+      parameters: bodyParameters,
+    });
+  }
+
   const payload = {
     messaging_product: "whatsapp",
-    to: to,
+    to,
     type: "template",
     template: {
       name: templateName,
-      language: { code: "en" },
-      components: components.length > 0 ? components : undefined
-    }
+      language: { code: meta.language },
+      ...(components.length > 0 ? { components } : {}),
+    },
   };
-  
+
   try {
     const response = await axios.post(url, payload, {
       headers: {
         Authorization: `Bearer ${WHATSAPP_TOKEN}`,
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
       },
-      timeout: 10000 // 10 second timeout
+      timeout: 10000, // 10 second timeout
     });
-    
+
     console.log(`✅ Template sent: ${templateName} → ${to}`);
     return response.data;
   } catch (error) {
     // Enhanced error logging and handling
     console.error(`❌ WhatsApp send error for ${to}:`);
-    
+
     if (error.response) {
-      // The request was made and the server responded with a status code
-      // that falls out of the range of 2xx
       console.error("Response status:", error.response.status);
       console.error("Response data:", JSON.stringify(error.response.data, null, 2));
       console.error("Response headers:", error.response.headers);
-      
-      // Extract meaningful error message from WhatsApp API response
+
       const whatsappError = error.response.data?.error;
       if (whatsappError) {
-        const errorMessage = whatsappError.message || whatsappError.error_user_msg || "WhatsApp API error";
+        const errorMessage =
+          whatsappError.message ||
+          whatsappError.error_user_msg ||
+          "WhatsApp API error";
         const errorCode = whatsappError.code || error.response.status;
         throw new Error(`WhatsApp API Error (${errorCode}): ${errorMessage}`);
       }
-      
+
       throw new Error(`WhatsApp API returned status ${error.response.status}`);
     } else if (error.request) {
-      // The request was made but no response was received
       console.error("No response received from WhatsApp API");
       console.error("Request details:", error.request);
       throw new Error("No response from WhatsApp API - network or timeout issue");
-    } else if (error.code === 'ECONNABORTED') {
-      // Request timeout
+    } else if (error.code === "ECONNABORTED") {
       console.error("Request timeout");
       throw new Error("WhatsApp API request timeout");
     } else {
-      // Something happened in setting up the request that triggered an Error
       console.error("Error setting up request:", error.message);
       throw new Error(`Request setup error: ${error.message}`);
     }
