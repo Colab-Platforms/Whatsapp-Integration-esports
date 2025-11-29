@@ -808,10 +808,10 @@ app.get("/api/support/user/:phoneNumber", async (req, res) => {
 // Map of template → language + body param count + optional header type
 // header: "image" | "video" | null
 const TEMPLATE_META = {
-    not_eligible: { language: "en_US", bodyParams: 0, header: null },
-  verified:     { language: "en_US", bodyParams: 0, header: null },
-  pending:      { language: "en_US", bodyParams: 0, header: null },
-  game_greeting:{ language: "en_US", bodyParams: 0, header: null },
+    not_eligible: { language: "en", bodyParams: 0, header: null },
+  verified:     { language: "en", bodyParams: 0, header: null },
+  pending:      { language: "en", bodyParams: 0, header: null },
+  game_greeting:{ language: "en", bodyParams: 0, header: null },
   // EXAMPLES (uncomment / adjust when you create them):
   // tournament_reminder: {
   //   language: "en_US",
@@ -841,7 +841,7 @@ async function sendTemplateMessageWithParams(to, templateName, params = {}) {
 
   // Resolve template meta (fallback = text-only, 0 params, en_US)
   if(!TEMPLATE_META[templateName]){
-  TEMPLATE_META[templateName] = { language:"en_US", bodyParams:0, header:null };
+  TEMPLATE_META[templateName] = { language:"en", bodyParams:0, header:null };
   console.log(`⚠ Auto-added template: ${templateName}`);
 }
 const meta = TEMPLATE_META[templateName];
