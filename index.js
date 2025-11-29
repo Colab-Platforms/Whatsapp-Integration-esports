@@ -241,6 +241,8 @@ app.post("/webhook", async (req, res) => {
 
 
 
+
+
     const messages = change?.messages;
     if (!messages) return res.status(200).json({ status: "no messages" });
 
@@ -796,6 +798,516 @@ app.get("/api/support/user/:phoneNumber", async (req, res) => {
   } catch (err) {
     console.error("❌ Error fetching user details:", err.message);
     res.status(500).json({ error: "Failed to fetch user details" });
+  }
+});
+
+// ================================================================
+// ✅ BULK MESSAGE SENDER API ENDPOINTS
+// ================================================================
+
+/**
+ * Helper function to send WhatsApp template message with dynamic parameters
+ * @param {string} to - Phone number with country code (e.g., 919876543210)
+ * @param {string} templateName - Name of the WhatsApp template
+ * @param {object} params - Dynamic parameters for the template (e.g., {tournament, date})
+ * @returns {Promise<object>} - WhatsApp API response
+ */
+async function sendTemplateMessageWithParams(to, templateName, params) {
+  const url = `${WHATSAPP_API_URL}/${WHATSAPP_PHONE_ID}/messages`;
+  
+  // Validate inputs
+  if (!to || to.trim() === "") {
+    throw new Error("Phone number is required");
+  }
+  
+  if (!templateName || templateName.trim() === "") {
+    throw new Error("Template name is required");
+  }
+  
+  // Build template components based on parameters
+  const components = [];
+  
+  if (params && (params.tournament || params.date)) {
+    const parameters = [];
+    if (params.tournament) {
+      parameters.push({ type: "text", text: String(params.tournament) });
+    }
+    if (params.date) {
+      parameters.push({ type: "text", text: String(params.date) });
+    }
+    
+    components.push({
+      type: "body",
+      parameters: parameters
+    });
+  }
+  
+  const payload = {
+    messaging_product: "whatsapp",
+    to: to,
+    type: "template",
+    template: {
+      name: templateName,
+      language: { code: "en" },
+      components: components.length > 0 ? components : undefined
+    }
+  };
+  
+  try {
+    const response = await axios.post(url, payload, {
+      headers: {
+        Authorization: `Bearer ${WHATSAPP_TOKEN}`,
+        "Content-Type": "application/json"
+      },
+      timeout: 10000 // 10 second timeout
+    });
+    
+    console.log(`✅ Template sent: ${templateName} → ${to}`);
+    return response.data;
+  } catch (error) {
+    // Enhanced error logging and handling
+    console.error(`❌ WhatsApp send error for ${to}:`);
+    
+    if (error.response) {
+      // The request was made and the server responded with a status code
+      // that falls out of the range of 2xx
+      console.error("Response status:", error.response.status);
+      console.error("Response data:", JSON.stringify(error.response.data, null, 2));
+      console.error("Response headers:", error.response.headers);
+      
+      // Extract meaningful error message from WhatsApp API response
+      const whatsappError = error.response.data?.error;
+      if (whatsappError) {
+        const errorMessage = whatsappError.message || whatsappError.error_user_msg || "WhatsApp API error";
+        const errorCode = whatsappError.code || error.response.status;
+        throw new Error(`WhatsApp API Error (${errorCode}): ${errorMessage}`);
+      }
+      
+      throw new Error(`WhatsApp API returned status ${error.response.status}`);
+    } else if (error.request) {
+      // The request was made but no response was received
+      console.error("No response received from WhatsApp API");
+      console.error("Request details:", error.request);
+      throw new Error("No response from WhatsApp API - network or timeout issue");
+    } else if (error.code === 'ECONNABORTED') {
+      // Request timeout
+      console.error("Request timeout");
+      throw new Error("WhatsApp API request timeout");
+    } else {
+      // Something happened in setting up the request that triggered an Error
+      console.error("Error setting up request:", error.message);
+      throw new Error(`Request setup error: ${error.message}`);
+    }
+  }
+}
+
+/**
+ * POST /api/bulk-message/send
+ * Send bulk WhatsApp messages to multiple teams
+ */
+app.post("/api/bulk-message/send", async (req, res) => {
+  try {
+    console.log("📨 Bulk message send request received");
+    const { teams, templateName, tournament, date, templateParams } = req.body;
+    
+    // Validate input with detailed error messages
+    if (!teams || !Array.isArray(teams)) {
+      console.error("❌ Validation failed: teams is not an array");
+      return res.status(400).json({ 
+        error: "Invalid request: teams must be an array" 
+      });
+    }
+    
+    if (teams.length === 0) {
+      console.error("❌ Validation failed: no teams provided");
+      return res.status(400).json({ 
+        error: "No teams provided. Please select at least one team." 
+      });
+    }
+    
+    if (!templateName || templateName.trim() === "") {
+      console.error("❌ Validation failed: template name missing");
+      return res.status(400).json({ 
+        error: "Template name is required" 
+      });
+    }
+    
+    if (!tournament || tournament.trim() === "") {
+      console.error("❌ Validation failed: tournament missing");
+      return res.status(400).json({ 
+        error: "Tournament is required" 
+      });
+    }
+    
+    // Validate team data
+    const invalidTeams = teams.filter(team => 
+      !team.teamId || !team.phoneNumber || !team.teamName
+    );
+    
+    if (invalidTeams.length > 0) {
+      console.error("❌ Validation failed: invalid team data", invalidTeams);
+      return res.status(400).json({ 
+        error: `${invalidTeams.length} team(s) have missing required fields (teamId, phoneNumber, or teamName)` 
+      });
+    }
+    
+    console.log(`📨 Starting bulk send: ${teams.length} teams, template: ${templateName}, tournament: ${tournament}`);
+    
+    const results = {
+      successful: 0,
+      failed: 0,
+      details: []
+    };
+    
+    // Send messages to all teams with delay to avoid rate limiting
+    for (let i = 0; i < teams.length; i++) {
+      const team = teams[i];
+      
+      try {
+        // Validate phone number format
+        let phoneNumber = team.phoneNumber?.trim();
+        
+        if (!phoneNumber) {
+          throw new Error("Phone number is empty");
+        }
+        
+        // Ensure phone number has country code (add 91 if not present)
+        if (phoneNumber.length === 10) {
+          phoneNumber = `91${phoneNumber}`;
+        } else if (phoneNumber.length !== 12 || !phoneNumber.startsWith("91")) {
+          throw new Error(`Invalid phone number format: ${phoneNumber}`);
+        }
+        
+        console.log(`📤 [${i + 1}/${teams.length}] Sending to ${team.teamName} (${phoneNumber})`);
+        
+        await sendTemplateMessageWithParams(
+          phoneNumber,
+          templateName,
+          templateParams || { tournament, date }
+        );
+        
+        results.successful++;
+        results.details.push({
+          teamId: team.teamId,
+          teamName: team.teamName,
+          phoneNumber: team.phoneNumber,
+          status: "success"
+        });
+        
+        console.log(`✅ [${i + 1}/${teams.length}] Sent to ${team.teamName}`);
+        
+        // Add 100ms delay between messages to avoid rate limiting
+        if (i < teams.length - 1) {
+          await new Promise(resolve => setTimeout(resolve, 100));
+        }
+      } catch (error) {
+        results.failed++;
+        const errorMessage = error.message || "Unknown error";
+        
+        results.details.push({
+          teamId: team.teamId,
+          teamName: team.teamName,
+          phoneNumber: team.phoneNumber,
+          status: "failed",
+          error: errorMessage
+        });
+        
+        console.error(`❌ [${i + 1}/${teams.length}] Failed for ${team.teamName}: ${errorMessage}`);
+        
+        // Log WhatsApp API specific errors
+        if (error.response?.data) {
+          console.error("WhatsApp API error details:", JSON.stringify(error.response.data, null, 2));
+        }
+      }
+    }
+    
+    console.log(`📊 Bulk send completed: ${results.successful} successful, ${results.failed} failed`);
+    
+    // Store in bulkMessageHistory collection
+    const historyRecord = {
+      tournament: tournament,
+      templateName: templateName,
+      totalTeams: teams.length,
+      successfulCount: results.successful,
+      failedCount: results.failed,
+      sentDate: new Date().toISOString(),
+      teamIds: teams.map(t => t.teamId),
+      results: results.details
+    };
+    
+    try {
+      console.log("💾 Saving bulk message history to Firebase...");
+      const historyRef = await db.collection("bulkMessageHistory").add(historyRecord);
+      console.log(`✅ History saved with ID: ${historyRef.id}`);
+      
+      res.status(200).json({
+        success: true,
+        results: results,
+        historyId: historyRef.id
+      });
+    } catch (dbError) {
+      console.error("❌ Error saving to bulkMessageHistory:", dbError.message);
+      console.error("Database error details:", dbError);
+      
+      // Still return success for the messages that were sent
+      res.status(200).json({
+        success: true,
+        results: results,
+        historyId: null,
+        warning: "Messages sent but history not saved to database"
+      });
+    }
+    
+  } catch (error) {
+    console.error("❌ Bulk send error:", error.message);
+    console.error("Error stack:", error.stack);
+    
+    res.status(500).json({ 
+      error: "Failed to send bulk messages. Please try again.",
+      details: error.message 
+    });
+  }
+});
+
+/**
+ * GET /api/whatsapp/templates
+ * Fetch WhatsApp message templates from Meta Graph API
+ */
+app.get("/api/whatsapp/templates", async (req, res) => {
+  try {
+    console.log("📋 Fetching WhatsApp templates from Meta Graph API...");
+    
+    // Get WABA ID from environment variable
+    const WABA_ID = "1540862954008233";
+    
+    if (!WABA_ID) {
+      console.error("❌ WHATSAPP_BUSINESS_ACCOUNT_ID not configured");
+      return res.status(500).json({ 
+        error: "WhatsApp Business Account ID not configured",
+        templates: []
+      });
+    }
+    
+    if (!WHATSAPP_TOKEN) {
+      console.error("❌ WHATSAPP_TOKEN not configured");
+      return res.status(500).json({ 
+        error: "WhatsApp token not configured",
+        templates: []
+      });
+    }
+    
+    // Fetch templates from Meta Graph API
+    const url = `${WHATSAPP_API_URL}/${WABA_ID}/message_templates`;
+    
+    console.log(`📡 Requesting templates from: ${url}`);
+    
+    const response = await axios.get(url, {
+      headers: {
+        Authorization: `Bearer ${WHATSAPP_TOKEN}`
+      },
+      params: {
+        limit: 100 // Get up to 100 templates
+      }
+    });
+    
+    const templates = response.data.data || [];
+    
+    console.log(`✅ Fetched ${templates.length} templates from Meta`);
+    
+    // Filter only approved templates and format the response
+    const approvedTemplates = templates
+      .filter(template => template.status === "APPROVED")
+      .map(template => ({
+        id: template.id,
+        name: template.name,
+        language: template.language,
+        status: template.status,
+        category: template.category,
+        components: template.components || []
+      }));
+    
+    console.log(`✅ Returning ${approvedTemplates.length} approved templates`);
+    
+    res.status(200).json({
+      success: true,
+      count: approvedTemplates.length,
+      templates: approvedTemplates
+    });
+    
+  } catch (error) {
+    console.error("❌ Error fetching WhatsApp templates:", error.response?.data || error.message);
+    
+    res.status(500).json({
+      error: "Failed to fetch templates",
+      message: error.response?.data?.error?.message || error.message,
+      templates: []
+    });
+  }
+});
+
+/**
+ * GET /api/bulk-message/history
+ * Fetch bulk message history with pagination
+ */
+app.get("/api/bulk-message/history", async (req, res) => {
+  try {
+    const limit = parseInt(req.query.limit) || 50;
+    const offset = parseInt(req.query.offset) || 0;
+    
+    // Validate query parameters
+    if (limit < 1 || limit > 100) {
+      console.warn(`⚠️ Invalid limit parameter: ${limit}, using default 50`);
+    }
+    
+    if (offset < 0) {
+      console.warn(`⚠️ Invalid offset parameter: ${offset}, using default 0`);
+    }
+    
+    const validLimit = Math.min(Math.max(limit, 1), 100);
+    const validOffset = Math.max(offset, 0);
+    
+    console.log(`📋 Fetching bulk message history (limit: ${validLimit}, offset: ${validOffset})`);
+    
+    try {
+      const historySnapshot = await db
+        .collection("bulkMessageHistory")
+        .orderBy("sentDate", "desc")
+        .limit(validLimit)
+        .offset(validOffset)
+        .get();
+      
+      if (!historySnapshot) {
+        console.warn("⚠️ History snapshot is null or undefined");
+        return res.status(200).json({ 
+          history: [],
+          count: 0,
+          limit: validLimit,
+          offset: validOffset
+        });
+      }
+      
+      const history = historySnapshot.docs.map(doc => {
+        try {
+          return {
+            id: doc.id,
+            ...doc.data()
+          };
+        } catch (docError) {
+          console.error(`❌ Error processing history document ${doc.id}:`, docError.message);
+          return null;
+        }
+      }).filter(record => record !== null);
+      
+      console.log(`✅ Retrieved ${history.length} history records`);
+      
+      res.status(200).json({ 
+        history,
+        count: history.length,
+        limit: validLimit,
+        offset: validOffset
+      });
+      
+    } catch (dbError) {
+      console.error("❌ Database error fetching history:", dbError.message);
+      console.error("Database error details:", dbError);
+      
+      // Check for specific Firebase errors
+      if (dbError.code === 'permission-denied') {
+        return res.status(403).json({ 
+          error: "Permission denied to access history",
+          details: "You may not have access to the bulkMessageHistory collection" 
+        });
+      } else if (dbError.code === 'unavailable') {
+        return res.status(503).json({ 
+          error: "Database service unavailable",
+          details: "The database service is temporarily unavailable. Please try again later." 
+        });
+      }
+      
+      throw dbError;
+    }
+    
+  } catch (error) {
+    console.error("❌ Error fetching history:", error.message);
+    console.error("Error stack:", error.stack);
+    
+    res.status(500).json({ 
+      error: "Failed to fetch history. Please try again.",
+      details: error.message 
+    });
+  }
+});
+
+/**
+ * DELETE /api/bulk-message/history/:id
+ * Delete a specific bulk message history record
+ */
+app.delete("/api/bulk-message/history/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    // Validate history ID
+    if (!id || id.trim() === "") {
+      console.error("❌ Validation failed: history ID is empty");
+      return res.status(400).json({ 
+        error: "History ID is required" 
+      });
+    }
+    
+    console.log(`🗑️ Deleting bulk message history: ${id}`);
+    
+    try {
+      // Check if document exists before deleting
+      const docRef = db.collection("bulkMessageHistory").doc(id);
+      const docSnapshot = await docRef.get();
+      
+      if (!docSnapshot.exists) {
+        console.warn(`⚠️ History record not found: ${id}`);
+        return res.status(404).json({ 
+          error: "History record not found",
+          details: "The history record may have already been deleted"
+        });
+      }
+      
+      // Delete the document
+      await docRef.delete();
+      
+      console.log(`✅ History record deleted: ${id}`);
+      
+      res.status(200).json({ 
+        success: true, 
+        message: "History deleted successfully",
+        id: id
+      });
+      
+    } catch (dbError) {
+      console.error("❌ Database error deleting history:", dbError.message);
+      console.error("Database error details:", dbError);
+      
+      // Check for specific Firebase errors
+      if (dbError.code === 'permission-denied') {
+        return res.status(403).json({ 
+          error: "Permission denied to delete history",
+          details: "You may not have permission to delete from the bulkMessageHistory collection" 
+        });
+      } else if (dbError.code === 'unavailable') {
+        return res.status(503).json({ 
+          error: "Database service unavailable",
+          details: "The database service is temporarily unavailable. Please try again later." 
+        });
+      }
+      
+      throw dbError;
+    }
+    
+  } catch (error) {
+    console.error("❌ Error deleting history:", error.message);
+    console.error("Error stack:", error.stack);
+    
+    res.status(500).json({ 
+      error: "Failed to delete history. Please try again.",
+      details: error.message 
+    });
   }
 });
 
