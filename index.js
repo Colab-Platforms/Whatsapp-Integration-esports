@@ -1022,20 +1022,8 @@ app.post("/api/bulk-message/send", async (req, res) => {
       }
     }
 
-    // ✅ If template expects HEADER IMAGE/VIDEO, make sure required URLs are provided
-    if (meta.header === "image") {
-      const headerImage =
-        imageUrl || templateParams?.imageUrl;
-
-      if (!headerImage) {
-        console.error(
-          `❌ Validation failed: template "${templateName}" requires imageUrl for header`
-        );
-        return res.status(400).json({
-          error: `Template "${templateName}" requires an imageUrl for the header`,
-        });
-      }
-    }
+    // ✅ If template expects HEADER IMAGE/VIDEO, use provided URL or default
+    // No validation error - we'll use a default image if none provided
 
     if (meta.header === "video") {
       const headerVideo =
@@ -1160,11 +1148,40 @@ app.post("/api/bulk-message/send", async (req, res) => {
       `📊 Bulk send completed: ${results.successful} successful, ${results.failed} failed`
     );
 
-    // You likely already have Firestore save logic below this – keep that as-is
-    return res.status(200).json({
-      success: true,
-      results,
-    });
+     // Store in bulkMessageHistory collection
+    const historyRecord = {
+      tournament: tournament,
+      templateName: templateName,
+      totalTeams: teams.length,
+      successfulCount: results.successful,
+      failedCount: results.failed,
+      sentDate: new Date().toISOString(),
+      teamIds: teams.map(t => t.teamId),
+      results: results.details
+    };
+    
+    try {
+      console.log("💾 Saving bulk message history to Firebase...");
+      const historyRef = await db.collection("bulkMessageHistory").add(historyRecord);
+      console.log(`✅ History saved with ID: ${historyRef.id}`);
+      
+      res.status(200).json({
+        success: true,
+        results: results,
+        historyId: historyRef.id
+      });
+    } catch (dbError) {
+      console.error("❌ Error saving to bulkMessageHistory:", dbError.message);
+      console.error("Database error details:", dbError);
+      
+      // Still return success for the messages that were sent
+      res.status(200).json({
+        success: true,
+        results: results,
+        historyId: null,
+        warning: "Messages sent but history not saved to database"
+      });
+    }
   } catch (error) {
     console.error("❌ Bulk send error:", error.message);
     console.error("Error stack:", error.stack);
