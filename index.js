@@ -812,12 +812,12 @@ const TEMPLATE_META = {
   verified:     { language: "en", bodyParams: 0, header: null },
   pending:      { language: "en", bodyParams: 0, header: null },
   game_greeting:{ language: "en", bodyParams: 0, header: "image" },
-  // EXAMPLES (uncomment / adjust when you create them):
-  // tournament_reminder: {
-  //   language: "en_US",
-  //   bodyParams: 2,         // e.g. {{1}} = tournament, {{2}} = date
-  //   header: "image"        // uses header image
-  // },
+  // ✅ New template for Colab Champion League
+  bulk_greeting: { 
+    language: "en",   // or "en_US" / whatever EXACTLY Meta shows
+    bodyParams: 0,    // no {{1}} {{2}} in body
+    header: "image"   // because the template has an image header
+  },
 };
 
 /**
@@ -1091,7 +1091,7 @@ app.post("/api/bulk-message/send", async (req, res) => {
           ...(date ? { date } : {}),
           // 👇 Only attach image if template requires header IMAGE
   ...(meta.header === "image"
-      ? { imageUrl: imageUrl || "https://res.cloudinary.com/dpjflcgx5/image/upload/v1764149536/Colab_the_grind_1_nzbrqf.jpg" }
+      ? { imageUrl: imageUrl || "https://res.cloudinary.com/dlmcpmdpn/image/upload/v1765266071/Prize_Pool_2.0_1_bdcuna.jpg" }
       : {}
   )
         };
