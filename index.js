@@ -389,21 +389,34 @@ app.post("/webhook", async (req, res) => {
 
         try {
           // 0) find latest registration (avoid index using registrationDate)
+          // const querySnapshot = await db
+          //   .collection("teamRegistrations")
+          //   .where("phoneNumber", "==", shortPhone)
+          //   .orderBy("registrationDate", "desc")
+          //   .limit(1)
+          //   .get();
+
           const querySnapshot = await db
-            .collection("teamRegistrations")
-            .where("phoneNumber", "==", shortPhone)
-            .orderBy("registrationDate", "desc")
-            .limit(1)
-            .get();
+          .collection("teamRegistrations")
+          .where("phoneNumber", "==", shortPhone)
+          .limit(1)
+          .get();
 
           if (querySnapshot.empty) {
             console.log(`⚠️ No matching teamRegistrations record for ${shortPhone}.`);
-            continue; // if inside for-loop
+            continue;
           }
-
           const regDoc = querySnapshot.docs[0];
-          const registrationId = regDoc.id;      // ✅ registrationId
-          const docRef = regDoc.ref;             // ✅ same doc ref
+          const registrationId = regDoc.id;
+
+          // if (querySnapshot.empty) {
+          //   console.log(`⚠️ No matching teamRegistrations record for ${shortPhone}.`);
+          //   continue; // if inside for-loop
+          // }
+
+          // const regDoc = querySnapshot.docs[0];
+          // const registrationId = regDoc.id;      // ✅ registrationId
+          // const docRef = regDoc.ref;             // ✅ same doc ref
 
           // 1) Get media URL
           const mediaRes = await axios.get(
