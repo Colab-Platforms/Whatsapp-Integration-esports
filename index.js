@@ -351,23 +351,24 @@ app.post("/webhook", async (req, res) => {
           const querySnapshot = await db
             .collection("teamRegistrations")
             .where("phoneNumber", "==", shortPhone)
+            .orderBy("updatedAt", "desc")   // ✅ pick most recently updated doc
+            .limit(1)                       // ✅ only latest
             .get();
 
           if (!querySnapshot.empty) {
             const docRef = querySnapshot.docs[0].ref;
+
             await docRef.update({
-              images: admin.firestore.FieldValue.arrayUnion(
-                uploadedImage.secure_url
-              ),
+              images: admin.firestore.FieldValue.arrayUnion(uploadedImage.secure_url),
               verificationStatus: "image_uploaded",
-              updatedAt: timestamp,
+              updatedAt: admin.firestore.FieldValue.serverTimestamp(), // ✅ best
             });
-            console.log(`🔥 Image URL saved in teamRegistrations for ${shortPhone}`);
+
+            console.log(`🔥 Image URL saved in LATEST teamRegistrations for ${shortPhone}`);
           } else {
-            console.log(
-              `⚠️ No matching teamRegistrations record for ${shortPhone}.`
-            );
+            console.log(`⚠️ No matching teamRegistrations record for ${shortPhone}.`);
           }
+
 
           // (Optional) Keep a debug copy in memory, but NOT in whatsappChats
           receivedMessagesStore.push({
