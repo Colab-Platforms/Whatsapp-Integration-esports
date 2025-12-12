@@ -314,16 +314,101 @@ app.post("/webhook", async (req, res) => {
       }
 
       // ✅ IMAGE MESSAGE: DO NOT store in whatsappChats; save to teamRegistrations only
+      // if (msg.image?.id) {
+      //   const mediaId = msg.image.id;
+      //   console.log(`🖼 Received image from ${shortPhone} (Media ID: ${mediaId})`);
+      //   try {
+      //     // 1) Get media URL
+      //     const mediaRes = await axios.get(
+      //       `https://graph.facebook.com/v24.0/${mediaId}`,
+      //       {
+      //         headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` },
+      //       }
+      //     );
+      //     const mediaUrl = mediaRes.data.url;
+
+      //     // 2) Download the image
+      //     const imageResponse = await axios.get(mediaUrl, {
+      //       responseType: "arraybuffer",
+      //       headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` },
+      //     });
+
+      //     // 3) Upload to Cloudinary
+      //     const uploadedImage = await new Promise((resolve, reject) => {
+      //       const uploadStream = cloudinary.uploader.upload_stream(
+      //         { folder: `whatsapp_media/${shortPhone}` },
+      //         (error, result) => {
+      //           if (error) reject(error);
+      //           else resolve(result);
+      //         }
+      //       );
+      //       uploadStream.end(imageResponse.data);
+      //     });
+
+      //     console.log(`✅ Uploaded to Cloudinary: ${uploadedImage.secure_url}`);
+
+      //     // 4) Save URL into teamRegistrations only (no whatsappChats write)
+      //     const querySnapshot = await db
+      //       .collection("teamRegistrations")
+      //       .where("phoneNumber", "==", shortPhone)
+      //       .orderBy("registrationDate", "desc")   // ✅ pick most recently updated doc
+      //       .limit(1)                       // ✅ only latest
+      //       .get();
+
+      //     if (!querySnapshot.empty) {
+      //       const docRef = querySnapshot.docs[0].ref;
+
+      //       await docRef.update({
+      //         images: admin.firestore.FieldValue.arrayUnion(uploadedImage.secure_url),
+      //         verificationStatus: "image_uploaded",
+      //         updatedAt: admin.firestore.FieldValue.serverTimestamp(), // ✅ best
+      //       });
+
+      //       console.log(`🔥 Image URL saved in LATEST teamRegistrations for ${shortPhone}`);
+      //     } else {
+      //       console.log(`⚠️ No matching teamRegistrations record for ${shortPhone}.`);
+      //     }
+
+
+      //     // (Optional) Keep a debug copy in memory, but NOT in whatsappChats
+      //     receivedMessagesStore.push({
+      //       from,
+      //       text: `[Image] ${uploadedImage.secure_url}`,
+      //       timestamp,
+      //       mediaId,
+      //       cloudinary_id: uploadedImage.public_id,
+      //     });
+      //   } catch (err) {
+      //     console.error("❌ Error handling image:", err?.response?.data || err.message);
+      //   }
+      // }
+
       if (msg.image?.id) {
         const mediaId = msg.image.id;
         console.log(`🖼 Received image from ${shortPhone} (Media ID: ${mediaId})`);
+
         try {
+          // 0) find latest registration (avoid index using registrationDate)
+          const querySnapshot = await db
+            .collection("teamRegistrations")
+            .where("phoneNumber", "==", shortPhone)
+            .orderBy("registrationDate", "desc")
+            .limit(1)
+            .get();
+
+          if (querySnapshot.empty) {
+            console.log(`⚠️ No matching teamRegistrations record for ${shortPhone}.`);
+            continue; // if inside for-loop
+          }
+
+          const regDoc = querySnapshot.docs[0];
+          const registrationId = regDoc.id;      // ✅ registrationId
+          const docRef = regDoc.ref;             // ✅ same doc ref
+
           // 1) Get media URL
           const mediaRes = await axios.get(
             `https://graph.facebook.com/v24.0/${mediaId}`,
-            {
-              headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` },
-            }
+            { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` } }
           );
           const mediaUrl = mediaRes.data.url;
 
@@ -333,55 +418,40 @@ app.post("/webhook", async (req, res) => {
             headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` },
           });
 
-          // 3) Upload to Cloudinary
+          // 3) Upload to Cloudinary (✅ store by registrationId, not phone)
           const uploadedImage = await new Promise((resolve, reject) => {
             const uploadStream = cloudinary.uploader.upload_stream(
-              { folder: `whatsapp_media/${shortPhone}` },
-              (error, result) => {
-                if (error) reject(error);
-                else resolve(result);
-              }
+              { folder: `whatsapp_media/${registrationId}` }, // ✅ changed
+              (error, result) => (error ? reject(error) : resolve(result))
             );
             uploadStream.end(imageResponse.data);
           });
 
           console.log(`✅ Uploaded to Cloudinary: ${uploadedImage.secure_url}`);
 
-          // 4) Save URL into teamRegistrations only (no whatsappChats write)
-          const querySnapshot = await db
-            .collection("teamRegistrations")
-            .where("phoneNumber", "==", shortPhone)
-            .orderBy("updatedAt", "desc")   // ✅ pick most recently updated doc
-            .limit(1)                       // ✅ only latest
-            .get();
+          // 4) Update teamRegistrations/<registrationId>
+          await docRef.update({
+            images: admin.firestore.FieldValue.arrayUnion(uploadedImage.secure_url),
+            verificationStatus: "image_uploaded",
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          });
 
-          if (!querySnapshot.empty) {
-            const docRef = querySnapshot.docs[0].ref;
+          console.log(`🔥 Image URL saved in teamRegistrations/${registrationId}`);
 
-            await docRef.update({
-              images: admin.firestore.FieldValue.arrayUnion(uploadedImage.secure_url),
-              verificationStatus: "image_uploaded",
-              updatedAt: admin.firestore.FieldValue.serverTimestamp(), // ✅ best
-            });
-
-            console.log(`🔥 Image URL saved in LATEST teamRegistrations for ${shortPhone}`);
-          } else {
-            console.log(`⚠️ No matching teamRegistrations record for ${shortPhone}.`);
-          }
-
-
-          // (Optional) Keep a debug copy in memory, but NOT in whatsappChats
           receivedMessagesStore.push({
             from,
             text: `[Image] ${uploadedImage.secure_url}`,
             timestamp,
             mediaId,
             cloudinary_id: uploadedImage.public_id,
+            registrationId, // ✅ helpful
           });
+
         } catch (err) {
           console.error("❌ Error handling image:", err?.response?.data || err.message);
         }
       }
+
     }
 
     res.status(200).json({ status: "received" });
