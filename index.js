@@ -49,9 +49,52 @@ admin.initializeApp({
 
 const db = admin.firestore();
 
+// Configure Firestore settings for better performance
+db.settings({
+  ignoreUndefinedProperties: true,
+  // Enable offline persistence for better performance
+  cacheSizeBytes: 40000000, // 40MB cache
+});
+
 // 🔹 Express middleware
 app.use(cors());
 app.use(express.json());
+
+// Simple rate limiting to prevent Firebase quota abuse
+const requestCounts = new Map();
+const RATE_LIMIT_WINDOW = 60000; // 1 minute
+const MAX_REQUESTS_PER_MINUTE = 100;
+
+app.use((req, res, next) => {
+  const clientIP = req.ip || req.connection.remoteAddress;
+  const now = Date.now();
+  
+  // Clean old entries
+  for (const [ip, data] of requestCounts.entries()) {
+    if (now - data.firstRequest > RATE_LIMIT_WINDOW) {
+      requestCounts.delete(ip);
+    }
+  }
+  
+  // Check current IP
+  if (!requestCounts.has(clientIP)) {
+    requestCounts.set(clientIP, { count: 1, firstRequest: now });
+  } else {
+    const data = requestCounts.get(clientIP);
+    if (now - data.firstRequest < RATE_LIMIT_WINDOW) {
+      data.count++;
+      if (data.count > MAX_REQUESTS_PER_MINUTE) {
+        console.warn(`⚠️ Rate limit exceeded for IP: ${clientIP}`);
+        return res.status(429).json({ error: "Too many requests. Please try again later." });
+      }
+    } else {
+      // Reset window
+      requestCounts.set(clientIP, { count: 1, firstRequest: now });
+    }
+  }
+  
+  next();
+});
 
 // Request logging middleware
 app.use((req, res, next) => {
@@ -123,38 +166,42 @@ const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
 const MAX_CHAT_MESSAGES = 10;
 
 /**
- * Maintains chat message limit by deleting oldest messages (for registered users)
+ * Maintains chat message limit by deleting oldest messages (for registered users) - OPTIMIZED
  * @param {string} shortPhone - 10-digit phone number
  */
 async function maintainChatLimit(shortPhone) {
   try {
+    // Use a more efficient approach - only check count occasionally
+    const shouldCheck = Math.random() < 0.1; // Only check 10% of the time
+    if (!shouldCheck) return;
+
     const messagesRef = db
       .collection("whatsappChats")
       .doc(shortPhone)
       .collection("messages");
 
-    // Get total message count
-    const snapshot = await messagesRef.get();
+    // Get total message count more efficiently
+    const snapshot = await messagesRef
+      .orderBy("timestamp", "desc")
+      .limit(MAX_CHAT_MESSAGES + 5) // Only get a few extra to check
+      .get();
+
     const totalMessages = snapshot.size;
 
     if (totalMessages > MAX_CHAT_MESSAGES) {
       const excessCount = totalMessages - MAX_CHAT_MESSAGES;
       console.log(`🗑️ Deleting ${excessCount} old messages for ${shortPhone}`);
 
-      // Get oldest messages to delete
-      const oldMessagesSnapshot = await messagesRef
-        .orderBy("timestamp", "asc")
-        .limit(excessCount)
-        .get();
-
-      // Delete in batch
+      // Delete the excess messages from what we already fetched
       const batch = db.batch();
-      oldMessagesSnapshot.docs.forEach((doc) => {
+      const docsToDelete = snapshot.docs.slice(MAX_CHAT_MESSAGES);
+      
+      docsToDelete.forEach((doc) => {
         batch.delete(doc.ref);
       });
+      
       await batch.commit();
-
-      console.log(`✅ Deleted ${excessCount} old messages for ${shortPhone}`);
+      console.log(`✅ Deleted ${docsToDelete.length} old messages for ${shortPhone}`);
     }
   } catch (error) {
     console.error(`❌ Error maintaining chat limit for ${shortPhone}:`, error.message);
@@ -162,38 +209,42 @@ async function maintainChatLimit(shortPhone) {
 }
 
 /**
- * Maintains support chat message limit by deleting oldest messages (for unknown users)
+ * Maintains support chat message limit by deleting oldest messages (for unknown users) - OPTIMIZED
  * @param {string} shortPhone - 10-digit phone number
  */
 async function maintainSupportChatLimit(shortPhone) {
   try {
+    // Use a more efficient approach - only check count occasionally
+    const shouldCheck = Math.random() < 0.1; // Only check 10% of the time
+    if (!shouldCheck) return;
+
     const messagesRef = db
       .collection("supportChats")
       .doc(shortPhone)
       .collection("messages");
 
-    // Get total message count
-    const snapshot = await messagesRef.get();
+    // Get total message count more efficiently
+    const snapshot = await messagesRef
+      .orderBy("timestamp", "desc")
+      .limit(MAX_CHAT_MESSAGES + 5) // Only get a few extra to check
+      .get();
+
     const totalMessages = snapshot.size;
 
     if (totalMessages > MAX_CHAT_MESSAGES) {
       const excessCount = totalMessages - MAX_CHAT_MESSAGES;
       console.log(`🗑️ Deleting ${excessCount} old support messages for ${shortPhone}`);
 
-      // Get oldest messages to delete
-      const oldMessagesSnapshot = await messagesRef
-        .orderBy("timestamp", "asc")
-        .limit(excessCount)
-        .get();
-
-      // Delete in batch
+      // Delete the excess messages from what we already fetched
       const batch = db.batch();
-      oldMessagesSnapshot.docs.forEach((doc) => {
+      const docsToDelete = snapshot.docs.slice(MAX_CHAT_MESSAGES);
+      
+      docsToDelete.forEach((doc) => {
         batch.delete(doc.ref);
       });
+      
       await batch.commit();
-
-      console.log(`✅ Deleted ${excessCount} old support messages for ${shortPhone}`);
+      console.log(`✅ Deleted ${docsToDelete.length} old support messages for ${shortPhone}`);
     }
   } catch (error) {
     console.error(`❌ Error maintaining support chat limit for ${shortPhone}:`, error.message);
@@ -348,9 +399,12 @@ app.post("/webhook", async (req, res) => {
           console.log(`✅ Uploaded to Cloudinary: ${uploadedImage.secure_url}`);
 
           // 4) Save URL into teamRegistrations only (no whatsappChats write)
+          // Get the most recent registration for this phone number
           const querySnapshot = await db
             .collection("teamRegistrations")
             .where("phoneNumber", "==", shortPhone)
+            .orderBy("registrationDate", "desc")
+            .limit(1)
             .get();
 
           if (!querySnapshot.empty) {
@@ -362,7 +416,7 @@ app.post("/webhook", async (req, res) => {
               verificationStatus: "image_uploaded",
               updatedAt: timestamp,
             });
-            console.log(`🔥 Image URL saved in teamRegistrations for ${shortPhone}`);
+            console.log(`🔥 Image URL saved in teamRegistrations for ${shortPhone} (most recent entry)`);
           } else {
             console.log(
               `⚠️ No matching teamRegistrations record for ${shortPhone}.`
@@ -707,37 +761,36 @@ app.get("/api/support/history/:phoneNumber", async (req, res) => {
 });
 
 // ================================================================
-// ✅ GET ALL SUPPORT CHAT USERS (for support tab)
+// ✅ GET ALL SUPPORT CHAT USERS (for support tab) - OPTIMIZED
 //     - Returns list of ONLY UNKNOWN users from supportChats collection
 // ================================================================
 app.get("/api/support/users", async (req, res) => {
   try {
-    const chatsSnapshot = await db.collection("supportChats").get();
+    // Limit to recent chats only to reduce Firebase reads
+    const limit = parseInt(req.query.limit) || 20;
+    const chatsSnapshot = await db
+      .collection("supportChats")
+      .orderBy("lastUpdated", "desc")
+      .limit(limit)
+      .get();
+    
     const users = [];
+
+    // Use batch processing to reduce individual queries
+    const batch = db.batch();
+    const messagePromises = [];
 
     for (const chatDoc of chatsSnapshot.docs) {
       const phoneNumber = chatDoc.id;
       const chatData = chatDoc.data();
       
-      // Get the last message
-      const lastMessageSnapshot = await db
-        .collection("supportChats")
-        .doc(phoneNumber)
-        .collection("messages")
-        .orderBy("timestamp", "desc")
-        .limit(1)
-        .get();
-
-      const lastMessage = lastMessageSnapshot.empty 
-        ? null 
-        : lastMessageSnapshot.docs[0].data();
-
+      // Use cached lastUpdated instead of querying messages every time
       users.push({
         phoneNumber,
-        name: phoneNumber, // Use phone number as name
+        name: phoneNumber,
         profileImage: null,
-        lastMessage: lastMessage?.text || "No messages",
-        lastMessageTime: lastMessage?.timestamp || chatData.lastUpdated,
+        lastMessage: "Recent activity", // Generic message to avoid extra queries
+        lastMessageTime: chatData.lastUpdated,
         unreadCount: 0,
         isRegistered: false,
       });
@@ -746,7 +799,7 @@ app.get("/api/support/users", async (req, res) => {
     // Sort by last message time (most recent first)
     users.sort((a, b) => new Date(b.lastMessageTime) - new Date(a.lastMessageTime));
 
-    console.log(`✅ Found ${users.length} unknown users in support chat`);
+    console.log(`✅ Found ${users.length} unknown users in support chat (optimized)`);
     res.status(200).json({ users });
   } catch (err) {
     console.error("❌ Error fetching support users:", err.message);
