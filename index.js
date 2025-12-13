@@ -153,6 +153,29 @@ let receivedMessagesStore = [];
 // ================================================================
 app.post("/api/send-whatsapp", sendWhatsAppMessage);
 
+// Test endpoint for WhatsApp API
+app.post("/api/test-whatsapp", async (req, res) => {
+  console.log("🧪 WhatsApp Test Endpoint Called");
+  console.log("📨 Test Request Body:", req.body);
+  
+  try {
+    const { phone } = req.body;
+    
+    if (!phone) {
+      return res.status(400).json({ error: "Phone number required for test" });
+    }
+
+    // Call the same controller
+    await sendWhatsAppMessage(req, res);
+  } catch (error) {
+    console.error("❌ WhatsApp test failed:", error.message);
+    res.status(500).json({ 
+      error: "WhatsApp test failed", 
+      details: error.message 
+    });
+  }
+});
+
 // Root test route
 app.get("/", (req, res) => {
   res.json({

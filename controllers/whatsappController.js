@@ -5,12 +5,18 @@ dotenv.config();
 const WHATSAPP_API_URL = `https://graph.facebook.com/v24.0/${process.env.PHONE_NUMBER_ID}/messages`;
 
 export const sendWhatsAppMessage = async (req, res) => {
+  console.log("🚀 WhatsApp Controller Called");
+  console.log("📨 Request Body:", req.body);
+  
   try {
-    const { phone } = req.body;
+    const { phone, name } = req.body;
 
     if (!phone) {
+      console.log("❌ Phone number missing");
       return res.status(400).json({ error: "User phone number is required" });
     }
+
+    console.log(`📱 Processing phone: ${phone}, name: ${name}`);
 
     // Validate phone number format
     const phoneDigits = phone.replace(/[^\d]/g, "");
@@ -35,6 +41,8 @@ export const sendWhatsAppMessage = async (req, res) => {
     }
     
     console.log(`📱 Original phone: ${phone}, Formatted: ${formattedUserPhone}`);
+    console.log(`🔧 WhatsApp API URL: ${WHATSAPP_API_URL}`);
+    console.log(`🔑 Token configured: ${!!process.env.WHATSAPP_TOKEN}`);
 
     const payload = {
   messaging_product: "whatsapp",
@@ -59,6 +67,8 @@ export const sendWhatsAppMessage = async (req, res) => {
   }
 };
 
+    console.log("📤 Sending payload to WhatsApp:", JSON.stringify(payload, null, 2));
+
     const response = await axios.post(WHATSAPP_API_URL, payload, {
       headers: {
         Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}`,
@@ -66,11 +76,12 @@ export const sendWhatsAppMessage = async (req, res) => {
       },
     });
 
-    console.log("✅ 'verified' template sent:", response.data);
+    console.log("✅ WhatsApp API Success Response:", response.data);
     res.status(200).json({
       success: true,
-      message: "Utility template 'verified' sent successfully.",
+      message: "Registration template sent successfully.",
       data: response.data,
+      phoneNumber: formattedUserPhone
     });
   } catch (error) {
     console.error("❌ Error sending WhatsApp message:", JSON.stringify(error.response?.data || error.message, null, 2));
