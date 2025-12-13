@@ -1,5 +1,6 @@
 import express from "express";
 import dotenv from "dotenv";
+import { sendWhatsAppMessage } from "./controllers/whatsappController.js";
 import cors from "cors";
 import axios from "axios";
 import fs from "fs";
@@ -10,25 +11,6 @@ import admin from "firebase-admin";
 
 // 🔹 Load environment variables
 dotenv.config();
-
-// 🔹 Validate required environment variables
-const requiredEnvVars = [
-  'FIREBASE_SERVICE_ACCOUNT',
-  'WHATSAPP_TOKEN',
-  'PHONE_NUMBER_ID',
-  'CLOUDINARY_CLOUD_NAME',
-  'CLOUDINARY_API_KEY',
-  'CLOUDINARY_API_SECRET'
-];
-
-const missingEnvVars = requiredEnvVars.filter(varName => !process.env[varName]);
-
-if (missingEnvVars.length > 0) {
-  console.error("❌ Missing required environment variables:", missingEnvVars);
-  console.error("Please set these environment variables in your deployment settings");
-  process.exit(1);
-}
-
 const app = express();
 
 // REQUIRED for WhatsApp Cloud API
@@ -57,72 +39,19 @@ cloudinary.config({
 });
 
 // 🔹 Firebase Admin Initialization
-let db;
-try {
-  if (!process.env.FIREBASE_SERVICE_ACCOUNT) {
-    throw new Error("FIREBASE_SERVICE_ACCOUNT environment variable is not set");
-  }
+const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+// Replace escaped line breaks with real line breaks
+serviceAccount.private_key = serviceAccount.private_key.replace(/\\n/g, "\n");
 
-  const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
-  // Replace escaped line breaks with real line breaks
-  serviceAccount.private_key = serviceAccount.private_key.replace(/\\n/g, "\n");
+admin.initializeApp({
+  credential: admin.credential.cert(serviceAccount),
+});
 
-  admin.initializeApp({
-    credential: admin.credential.cert(serviceAccount),
-  });
-
-  db = admin.firestore();
-
-  // Configure Firestore settings for better performance
-  db.settings({
-    ignoreUndefinedProperties: true,
-  });
-
-  console.log("✅ Firebase initialized successfully");
-} catch (error) {
-  console.error("❌ Firebase initialization failed:", error.message);
-  process.exit(1);
-}
+const db = admin.firestore();
 
 // 🔹 Express middleware
 app.use(cors());
 app.use(express.json());
-
-// Simple rate limiting to prevent Firebase quota abuse
-const requestCounts = new Map();
-const RATE_LIMIT_WINDOW = 60000; // 1 minute
-const MAX_REQUESTS_PER_MINUTE = 100;
-
-app.use((req, res, next) => {
-  const clientIP = req.ip || req.connection.remoteAddress;
-  const now = Date.now();
-  
-  // Clean old entries
-  for (const [ip, data] of requestCounts.entries()) {
-    if (now - data.firstRequest > RATE_LIMIT_WINDOW) {
-      requestCounts.delete(ip);
-    }
-  }
-  
-  // Check current IP
-  if (!requestCounts.has(clientIP)) {
-    requestCounts.set(clientIP, { count: 1, firstRequest: now });
-  } else {
-    const data = requestCounts.get(clientIP);
-    if (now - data.firstRequest < RATE_LIMIT_WINDOW) {
-      data.count++;
-      if (data.count > MAX_REQUESTS_PER_MINUTE) {
-        console.warn(`⚠️ Rate limit exceeded for IP: ${clientIP}`);
-        return res.status(429).json({ error: "Too many requests. Please try again later." });
-      }
-    } else {
-      // Reset window
-      requestCounts.set(clientIP, { count: 1, firstRequest: now });
-    }
-  }
-  
-  next();
-});
 
 // Request logging middleware
 app.use((req, res, next) => {
@@ -134,50 +63,11 @@ app.use((req, res, next) => {
 app.use((err, req, res, next) => {
   console.error(`❌ Global error: ${err.message}`);
   console.error(err.stack);
-  
-  // Don't expose internal errors in production
-  const isDevelopment = process.env.NODE_ENV === 'development';
-  
-  res.status(500).json({ 
-    error: "Internal server error", 
-    message: isDevelopment ? err.message : "Something went wrong"
-  });
+  res.status(500).json({ error: "Internal server error", message: err.message });
 });
 
 // 🔹 In-memory store (optional, for quick debug)
 let receivedMessagesStore = [];
-
-// ================================================================
-// ✅ WHATSAPP MESSAGE CONTROLLER
-// ================================================================
-async function sendWhatsAppMessage(req, res) {
-  try {
-    const { name, phone } = req.body;
-
-    if (!name || !phone) {
-      return res.status(400).json({ 
-        error: "Name and phone are required" 
-      });
-    }
-
-    console.log(`📨 Sending registration message to: ${phone}`);
-
-    // Send WhatsApp template message
-    const result = await sendTemplateMessage(phone, "game_greeting");
-
-    res.status(200).json({
-      success: true,
-      message: "WhatsApp message sent successfully",
-      result,
-    });
-  } catch (error) {
-    console.error("❌ Error sending WhatsApp message:", error.message);
-    res.status(500).json({
-      error: "Failed to send WhatsApp message",
-      details: error.message,
-    });
-  }
-}
 
 // ================================================================
 // ✅ REGISTRATION BUTTON TRIGGER
@@ -185,157 +75,18 @@ async function sendWhatsAppMessage(req, res) {
 app.post("/api/send-whatsapp", sendWhatsAppMessage);
 
 // Root test route
-app.get("/", (req, res) => {
-  res.json({
-    message: "✅ WhatsApp API + Firebase Server Running",
-    version: "1.0.0",
-    timestamp: new Date().toISOString(),
-    endpoints: {
-      health: "/health",
-      healthDetailed: "/health/detailed",
-      webhook: "/webhook",
-      sendWhatsApp: "/api/send-whatsapp"
-    }
-  });
-});
+app.get("/", (req, res) =>
+  res.send("✅ WhatsApp API + Firebase connected successfully!")
+);
 
-// Detailed health check endpoint
-app.get("/health/detailed", async (req, res) => {
-  const startTime = Date.now();
-  const detailedHealth = {
-    status: "healthy",
-    timestamp: new Date().toISOString(),
-    server: {
-      uptime: process.uptime(),
-      memory: process.memoryUsage(),
-      platform: process.platform,
-      nodeVersion: process.version,
-      pid: process.pid
-    },
-    environment: {
-      NODE_ENV: process.env.NODE_ENV || 'development',
-      PORT: process.env.PORT || 5000,
-      hasFirebaseConfig: !!process.env.FIREBASE_SERVICE_ACCOUNT,
-      hasWhatsAppToken: !!process.env.WHATSAPP_TOKEN,
-      hasCloudinaryConfig: !!process.env.CLOUDINARY_CLOUD_NAME
-    },
-    tests: {}
-  };
-
-  try {
-    // Test 1: Firebase Write/Read
-    try {
-      const testRef = db.collection("_health").doc("test");
-      const testData = { timestamp: new Date().toISOString(), test: "write-read" };
-      await testRef.set(testData);
-      const readDoc = await testRef.get();
-      detailedHealth.tests.firebase = {
-        status: "✅ Pass",
-        write: "Success",
-        read: readDoc.exists ? "Success" : "Failed",
-        latency: `${Date.now() - startTime}ms`
-      };
-    } catch (fbError) {
-      detailedHealth.tests.firebase = {
-        status: "❌ Fail",
-        error: fbError.message
-      };
-      detailedHealth.status = "degraded";
-    }
-
-    // Test 2: Environment Variables
-    const requiredEnvVars = ['FIREBASE_SERVICE_ACCOUNT', 'WHATSAPP_TOKEN', 'PHONE_NUMBER_ID'];
-    const missingVars = requiredEnvVars.filter(v => !process.env[v]);
-    detailedHealth.tests.environment = {
-      status: missingVars.length === 0 ? "✅ Pass" : "❌ Fail",
-      missing: missingVars,
-      configured: requiredEnvVars.filter(v => !!process.env[v])
-    };
-
-    // Test 3: Memory Usage
-    const memUsageMB = Math.round(process.memoryUsage().heapUsed / 1024 / 1024);
-    detailedHealth.tests.memory = {
-      status: memUsageMB < 500 ? "✅ Pass" : "⚠️ Warning",
-      usage: `${memUsageMB}MB`,
-      limit: "500MB"
-    };
-
-    detailedHealth.responseTime = Date.now() - startTime;
-    res.status(200).json(detailedHealth);
-  } catch (error) {
-    detailedHealth.status = "unhealthy";
-    detailedHealth.error = error.message;
-    detailedHealth.responseTime = Date.now() - startTime;
-    res.status(503).json(detailedHealth);
-  }
-});
-
-// Health check endpoint (comprehensive but safe)
-app.get("/health", async (req, res) => {
-  const startTime = Date.now();
-  const healthData = {
+// Health check endpoint
+app.get("/health", (req, res) => {
+  res.status(200).json({
     status: "healthy",
     timestamp: new Date().toISOString(),
     uptime: process.uptime(),
     memory: process.memoryUsage(),
-    environment: {
-      nodeVersion: process.version,
-      platform: process.platform,
-      nodeEnv: process.env.NODE_ENV || 'development'
-    },
-    services: {},
-    checks: {},
-    responseTime: 0
-  };
-
-  try {
-    console.log("🔍 Running health checks...");
-
-    // 1. Environment Variables Check
-    healthData.services.whatsapp = process.env.WHATSAPP_TOKEN ? "configured" : "missing";
-    healthData.services.cloudinary = process.env.CLOUDINARY_CLOUD_NAME ? "configured" : "missing";
-    healthData.services.firebase = process.env.FIREBASE_SERVICE_ACCOUNT ? "configured" : "missing";
-
-    // 2. Firebase Connection Test (safe query)
-    try {
-      console.log("🔥 Testing Firebase connection...");
-      // Use a simple document get instead of collection query
-      const testRef = db.collection("_system").doc("health_check");
-      await testRef.set({ 
-        lastCheck: new Date().toISOString(),
-        status: "ok" 
-      }, { merge: true });
-      
-      healthData.services.firebase = "connected";
-      healthData.checks.firebase = "✅ Connected and writable";
-      console.log("✅ Firebase connection successful");
-    } catch (firebaseError) {
-      console.error("❌ Firebase connection failed:", firebaseError.message);
-      healthData.services.firebase = "error";
-      healthData.checks.firebase = `❌ Error: ${firebaseError.message}`;
-      healthData.status = "degraded";
-    }
-
-    // 3. Memory Check
-    const memoryUsage = process.memoryUsage();
-    const memoryUsageMB = Math.round(memoryUsage.heapUsed / 1024 / 1024);
-    healthData.checks.memory = memoryUsageMB < 500 ? "✅ Normal" : "⚠️ High usage";
-
-    // 4. Response Time
-    healthData.responseTime = Date.now() - startTime;
-    healthData.checks.responseTime = healthData.responseTime < 1000 ? "✅ Fast" : "⚠️ Slow";
-
-    console.log(`✅ Health check completed in ${healthData.responseTime}ms`);
-    
-    res.status(200).json(healthData);
-  } catch (error) {
-    console.error("❌ Health check failed:", error.message);
-    healthData.status = "unhealthy";
-    healthData.error = error.message;
-    healthData.responseTime = Date.now() - startTime;
-    
-    res.status(503).json(healthData);
-  }
+  });
 });
 
 // ================================================================
@@ -372,42 +123,38 @@ const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
 const MAX_CHAT_MESSAGES = 10;
 
 /**
- * Maintains chat message limit by deleting oldest messages (for registered users) - OPTIMIZED
+ * Maintains chat message limit by deleting oldest messages (for registered users)
  * @param {string} shortPhone - 10-digit phone number
  */
 async function maintainChatLimit(shortPhone) {
   try {
-    // Use a more efficient approach - only check count occasionally
-    const shouldCheck = Math.random() < 0.1; // Only check 10% of the time
-    if (!shouldCheck) return;
-
     const messagesRef = db
       .collection("whatsappChats")
       .doc(shortPhone)
       .collection("messages");
 
-    // Get total message count more efficiently
-    const snapshot = await messagesRef
-      .orderBy("timestamp", "desc")
-      .limit(MAX_CHAT_MESSAGES + 5) // Only get a few extra to check
-      .get();
-
+    // Get total message count
+    const snapshot = await messagesRef.get();
     const totalMessages = snapshot.size;
 
     if (totalMessages > MAX_CHAT_MESSAGES) {
       const excessCount = totalMessages - MAX_CHAT_MESSAGES;
       console.log(`🗑️ Deleting ${excessCount} old messages for ${shortPhone}`);
 
-      // Delete the excess messages from what we already fetched
+      // Get oldest messages to delete
+      const oldMessagesSnapshot = await messagesRef
+        .orderBy("timestamp", "asc")
+        .limit(excessCount)
+        .get();
+
+      // Delete in batch
       const batch = db.batch();
-      const docsToDelete = snapshot.docs.slice(MAX_CHAT_MESSAGES);
-      
-      docsToDelete.forEach((doc) => {
+      oldMessagesSnapshot.docs.forEach((doc) => {
         batch.delete(doc.ref);
       });
-      
       await batch.commit();
-      console.log(`✅ Deleted ${docsToDelete.length} old messages for ${shortPhone}`);
+
+      console.log(`✅ Deleted ${excessCount} old messages for ${shortPhone}`);
     }
   } catch (error) {
     console.error(`❌ Error maintaining chat limit for ${shortPhone}:`, error.message);
@@ -415,42 +162,38 @@ async function maintainChatLimit(shortPhone) {
 }
 
 /**
- * Maintains support chat message limit by deleting oldest messages (for unknown users) - OPTIMIZED
+ * Maintains support chat message limit by deleting oldest messages (for unknown users)
  * @param {string} shortPhone - 10-digit phone number
  */
 async function maintainSupportChatLimit(shortPhone) {
   try {
-    // Use a more efficient approach - only check count occasionally
-    const shouldCheck = Math.random() < 0.1; // Only check 10% of the time
-    if (!shouldCheck) return;
-
     const messagesRef = db
       .collection("supportChats")
       .doc(shortPhone)
       .collection("messages");
 
-    // Get total message count more efficiently
-    const snapshot = await messagesRef
-      .orderBy("timestamp", "desc")
-      .limit(MAX_CHAT_MESSAGES + 5) // Only get a few extra to check
-      .get();
-
+    // Get total message count
+    const snapshot = await messagesRef.get();
     const totalMessages = snapshot.size;
 
     if (totalMessages > MAX_CHAT_MESSAGES) {
       const excessCount = totalMessages - MAX_CHAT_MESSAGES;
       console.log(`🗑️ Deleting ${excessCount} old support messages for ${shortPhone}`);
 
-      // Delete the excess messages from what we already fetched
+      // Get oldest messages to delete
+      const oldMessagesSnapshot = await messagesRef
+        .orderBy("timestamp", "asc")
+        .limit(excessCount)
+        .get();
+
+      // Delete in batch
       const batch = db.batch();
-      const docsToDelete = snapshot.docs.slice(MAX_CHAT_MESSAGES);
-      
-      docsToDelete.forEach((doc) => {
+      oldMessagesSnapshot.docs.forEach((doc) => {
         batch.delete(doc.ref);
       });
-      
       await batch.commit();
-      console.log(`✅ Deleted ${docsToDelete.length} old support messages for ${shortPhone}`);
+
+      console.log(`✅ Deleted ${excessCount} old support messages for ${shortPhone}`);
     }
   } catch (error) {
     console.error(`❌ Error maintaining support chat limit for ${shortPhone}:`, error.message);
@@ -605,21 +348,13 @@ app.post("/webhook", async (req, res) => {
           console.log(`✅ Uploaded to Cloudinary: ${uploadedImage.secure_url}`);
 
           // 4) Save URL into teamRegistrations only (no whatsappChats write)
-          // Get the most recent registration for this phone number (simplified query to avoid index requirement)
           const querySnapshot = await db
             .collection("teamRegistrations")
             .where("phoneNumber", "==", shortPhone)
             .get();
 
           if (!querySnapshot.empty) {
-            // Sort manually to get most recent entry (avoids Firebase index requirement)
-            const sortedDocs = querySnapshot.docs.sort((a, b) => {
-              const dateA = new Date(a.data().registrationDate || 0);
-              const dateB = new Date(b.data().registrationDate || 0);
-              return dateB - dateA; // Most recent first
-            });
-            
-            const docRef = sortedDocs[0].ref;
+            const docRef = querySnapshot.docs[0].ref;
             await docRef.update({
               images: admin.firestore.FieldValue.arrayUnion(
                 uploadedImage.secure_url
@@ -627,7 +362,7 @@ app.post("/webhook", async (req, res) => {
               verificationStatus: "image_uploaded",
               updatedAt: timestamp,
             });
-            console.log(`🔥 Image URL saved in teamRegistrations for ${shortPhone} (most recent entry)`);
+            console.log(`🔥 Image URL saved in teamRegistrations for ${shortPhone}`);
           } else {
             console.log(
               `⚠️ No matching teamRegistrations record for ${shortPhone}.`
@@ -972,47 +707,46 @@ app.get("/api/support/history/:phoneNumber", async (req, res) => {
 });
 
 // ================================================================
-// ✅ GET ALL SUPPORT CHAT USERS (for support tab) - OPTIMIZED
+// ✅ GET ALL SUPPORT CHAT USERS (for support tab)
 //     - Returns list of ONLY UNKNOWN users from supportChats collection
 // ================================================================
 app.get("/api/support/users", async (req, res) => {
   try {
-    // Limit to recent chats only to reduce Firebase reads (simplified query to avoid index requirement)
-    const limit = parseInt(req.query.limit) || 20;
-    const chatsSnapshot = await db
-      .collection("supportChats")
-      .limit(limit * 2) // Get more docs to sort manually
-      .get();
-    
+    const chatsSnapshot = await db.collection("supportChats").get();
     const users = [];
 
-    // Process documents and sort manually (avoids Firebase index requirement)
-    const sortedDocs = chatsSnapshot.docs.sort((a, b) => {
-      const dateA = new Date(a.data().lastUpdated || 0);
-      const dateB = new Date(b.data().lastUpdated || 0);
-      return dateB - dateA; // Most recent first
-    });
-
-    // Take only the requested limit after sorting
-    const limitedDocs = sortedDocs.slice(0, limit);
-
-    for (const chatDoc of limitedDocs) {
+    for (const chatDoc of chatsSnapshot.docs) {
       const phoneNumber = chatDoc.id;
       const chatData = chatDoc.data();
       
-      // Use cached lastUpdated instead of querying messages every time
+      // Get the last message
+      const lastMessageSnapshot = await db
+        .collection("supportChats")
+        .doc(phoneNumber)
+        .collection("messages")
+        .orderBy("timestamp", "desc")
+        .limit(1)
+        .get();
+
+      const lastMessage = lastMessageSnapshot.empty 
+        ? null 
+        : lastMessageSnapshot.docs[0].data();
+
       users.push({
         phoneNumber,
-        name: phoneNumber,
+        name: phoneNumber, // Use phone number as name
         profileImage: null,
-        lastMessage: "Recent activity", // Generic message to avoid extra queries
-        lastMessageTime: chatData.lastUpdated,
+        lastMessage: lastMessage?.text || "No messages",
+        lastMessageTime: lastMessage?.timestamp || chatData.lastUpdated,
         unreadCount: 0,
         isRegistered: false,
       });
     }
 
-    console.log(`✅ Found ${users.length} unknown users in support chat (optimized)`);
+    // Sort by last message time (most recent first)
+    users.sort((a, b) => new Date(b.lastMessageTime) - new Date(a.lastMessageTime));
+
+    console.log(`✅ Found ${users.length} unknown users in support chat`);
     res.status(200).json({ users });
   } catch (err) {
     console.error("❌ Error fetching support users:", err.message);
@@ -1740,16 +1474,8 @@ setInterval(() => {
 // ✅ START SERVER
 // ================================================================
 const PORT = process.env.PORT || 5000;
-
 app.listen(PORT, "0.0.0.0", () => {
-  console.log("🚀 ================================");
-  console.log(`🚀 Server running on port ${PORT}`);
-  console.log(`🚀 Environment: ${process.env.NODE_ENV || 'development'}`);
-  console.log(`🚀 Node version: ${process.version}`);
+  console.log(`🚀 Server running on http://localhost:${PORT}`);
   console.log(`📡 Keep-alive enabled: ${process.env.NODE_ENV !== "development"}`);
   console.log(`💾 Initial Memory: ${Math.round(process.memoryUsage().heapUsed / 1024 / 1024)}MB`);
-  console.log(`✅ Firebase: Connected`);
-  console.log(`✅ WhatsApp: ${process.env.WHATSAPP_TOKEN ? 'Configured' : 'Missing Token'}`);
-  console.log(`✅ Cloudinary: ${process.env.CLOUDINARY_CLOUD_NAME ? 'Configured' : 'Missing Config'}`);
-  console.log("🚀 ================================");
 });
